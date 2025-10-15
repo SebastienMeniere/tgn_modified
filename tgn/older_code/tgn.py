@@ -11,9 +11,6 @@ from modules.memory_updater import get_memory_updater
 from modules.embedding_module import get_embedding_module
 from model.time_encoding import TimeEncode
 
-import copy
-from contextlib import contextmanager, nullcontext
-import torch
 
 class TGN(torch.nn.Module):
   def __init__(self, neighbor_finder, node_features, edge_features, device, n_layers=2,
@@ -26,28 +23,19 @@ class TGN(torch.nn.Module):
                memory_updater_type="gru",
                use_destination_embedding_in_message=False,
                use_source_embedding_in_message=False,
-               dyrep=False,
-               node_dimension=None,
-               time_dimension=None):
+               dyrep=False):
     super(TGN, self).__init__()
 
-    self.n_layers = n_layers
-    self.neighbor_finder = neighbor_finder
+    # number of layers specified by the initiation parameters 
+    self.n_layers = n_layers # TODO! Find out where if this refers to decode or encoder
+    self.neighbor_finder = neighbor_finder #TODO! this could be redone for our specific task -- finidng more relavent neighbours 
     self.device = device
     self.logger = logging.getLogger(__name__)
 
     self.node_raw_features = torch.from_numpy(node_features.astype(np.float32)).to(device)
     self.edge_raw_features = torch.from_numpy(edge_features.astype(np.float32)).to(device)
 
-    self.n_raw_node_features = self.node_raw_features.shape[1]
-    # If a target node dimension is provided, learn a projection
-    if node_dimension is not None and int(node_dimension) > 0:
-      print("node_dim", node_dimension)
-      self.n_node_features = int(node_dimension)
-      self.node_projector = torch.nn.Linear(self.n_raw_node_features, self.n_node_features, bias=True)
-    else:
-      self.n_node_features = self.n_raw_node_features
-      self.node_projector = None
+    self.n_node_features = self.node_raw_features.shape[1]
     self.n_nodes = self.node_raw_features.shape[0]
     self.n_edge_features = self.edge_raw_features.shape[1]
     self.embedding_dimension = self.n_node_features
@@ -57,14 +45,9 @@ class TGN(torch.nn.Module):
     self.use_source_embedding_in_message = use_source_embedding_in_message
     self.dyrep = dyrep
 
-    self._suppress_memory_updates = False
-
     self.use_memory = use_memory
-    # Decouple time encoding dimension from node feature width if requested
-    t_dim = int(time_dimension) if (time_dimension is not None and int(time_dimension) > 0) else self.n_node_features
-    self.time_encoder = TimeEncode(dimension=t_dim)
+    self.time_encoder = TimeEncode(dimension=self.n_node_features)
     self.memory = None
-    self.memory_projector = None
 
     self.mean_time_shift_src = mean_time_shift_src
     self.std_time_shift_src = std_time_shift_src
@@ -72,13 +55,12 @@ class TGN(torch.nn.Module):
     self.std_time_shift_dst = std_time_shift_dst
 
     if self.use_memory:
-      print("mem_dim", memory_dimension)
       self.memory_dimension = memory_dimension
       self.memory_update_at_start = memory_update_at_start
       raw_message_dimension = 2 * self.memory_dimension + self.n_edge_features + \
                               self.time_encoder.dimension
-      print("raw_msg dim", raw_message_dimension)
       message_dimension = message_dimension if message_function != "identity" else raw_message_dimension
+      # TODO!! whats ups with the combination menthod not being inlcuded 
       self.memory = Memory(n_nodes=self.n_nodes,
                            memory_dimension=self.memory_dimension,
                            input_dimension=message_dimension,
@@ -94,10 +76,6 @@ class TGN(torch.nn.Module):
                                                message_dimension=message_dimension,
                                                memory_dimension=self.memory_dimension,
                                                device=device)
-      if self.memory_dimension != self.n_node_features:
-        self.memory_projector = torch.nn.Linear(self.memory_dimension, self.n_node_features)
-      else:
-        self.memory_projector = torch.nn.Identity()
 
     self.embedding_module_type = embedding_module_type
 
@@ -110,168 +88,20 @@ class TGN(torch.nn.Module):
                                                  n_layers=self.n_layers,
                                                  n_node_features=self.n_node_features,
                                                  n_edge_features=self.n_edge_features,
-                                                 n_time_features=self.time_encoder.dimension,
+                                                 n_time_features=self.n_node_features,
                                                  embedding_dimension=self.embedding_dimension,
                                                  device=self.device,
                                                  n_heads=n_heads, dropout=dropout,
                                                  use_memory=use_memory,
-                                                 n_neighbors=self.n_neighbors,
-                                                 memory_projector=self.memory_projector if self.use_memory else None,
-                                                 node_projector=self.node_projector)
+                                                 n_neighbors=self.n_neighbors)
 
     # MLP to compute probability on an edge given two node embeddings
+    # emb_dim = 172
+    # self.affinity_score = MergeLayer(emb_dim, emb_dim,
+    #                                  emb_dim,1)
     self.affinity_score = MergeLayer(self.n_node_features, self.n_node_features,
                                      self.n_node_features,
                                      1)
-    
-    
-  # ---- ---------------------------------
-
-  @contextmanager
-  def _no_memory_side_effects(self):
-      """
-      Temporarily prevent any persistent memory/message mutation.
-      We (a) clone memory tensors and messages, (b) force *no* update-at-start,
-      (c) restore everything on exit.
-      """
-      if not getattr(self, "use_memory", False) or not hasattr(self, "memory"):
-          yield
-          return
-
-      # backup
-      mem_backup = self.memory.memory.data.clone()
-      lu_backup  = self.memory.last_update.data.clone() if hasattr(self.memory, "last_update") else None
-      msg_backup = copy.deepcopy(self.memory.messages)
-
-      # flip update flags
-      orig_update_at_start = getattr(self, "memory_update_at_start", False)
-      self.memory_update_at_start = False
-      self._suppress_memory_updates = True
-
-      try:
-          yield
-      finally:
-          # restore tensors & messages
-          self.memory.memory.data.copy_(mem_backup)
-          if lu_backup is not None:
-              self.memory.last_update.data.copy_(lu_backup)
-          self.memory.messages = msg_backup
-          self.memory_update_at_start = orig_update_at_start
-          self._suppress_memory_updates = False
-
-
-  def compute_edge_logits_many_negs_no_update(
-      self,
-      sources,               # LongTensor [B]
-      destinations_pos,      # LongTensor [B]
-      destinations_neg,      # LongTensor [B, K] or [B*K]
-      timestamps,            # Float/LongTensor [B]
-      edge_idxs=None,
-      n_neighbors=20,
-      freeze_memory=True,
-  ):
-      """
-      Compute logits for 1 positive + many negatives per source WITHOUT any lasting
-      memory/message updates. Returns:
-        pos_logits: [B]
-        neg_logits: [B, K]
-      After you use these logits for loss, call `commit_positive_update(...)`
-      exactly once to advance the memory/time for the positive edge.
-      """
-      self.eval()  # scoring path doesn't need dropout
-
-      def _to_numpy(x):
-          if x is None:
-              return None
-          if isinstance(x, np.ndarray):
-              return x
-          if isinstance(x, torch.Tensor):
-              return x.detach().cpu().numpy()
-          return np.asarray(x)
-
-      # print("getting sources")
-      sources_np = _to_numpy(sources)
-      destinations_pos_np = _to_numpy(destinations_pos)
-      destinations_neg_np = _to_numpy(destinations_neg)
-      timestamps_np = _to_numpy(timestamps)
-      edge_idxs_np = _to_numpy(edge_idxs) if edge_idxs is not None else None
-
-      B = len(sources_np)
-      timestamps_np = timestamps_np.astype(np.float32, copy=False)
-      sources_np = sources_np.astype(np.int64, copy=False)
-      destinations_pos_np = destinations_pos_np.astype(np.int64, copy=False)
-      if destinations_neg_np.ndim == 1:
-          K = max(1, destinations_neg_np.size // max(1, B))
-          dest_neg = destinations_neg_np.reshape(B, K)
-      else:
-          dest_neg = destinations_neg_np
-          K = dest_neg.shape[1]
-      dest_neg = dest_neg.astype(np.int64, copy=False)
-
-      edge_idxs_np = None if edge_idxs_np is None else edge_idxs_np.astype(np.int64, copy=False)
-
-      ctx = self._no_memory_side_effects() if freeze_memory else nullcontext()
-
-      with ctx:
-          # --- positive scores ---
-          dummy_neg = sources_np  # placeholder, ignored downstream
-          src_e, dst_pos_e, _ = self.compute_temporal_embeddings(
-              sources_np, destinations_pos_np, dummy_neg, timestamps_np, edge_idxs_np, n_neighbors
-          )
-          pos_logits = self.affinity_score(src_e, dst_pos_e)  # whatever you use inside compute_edge_probabilities
-
-          # --- negative scores ---
-          # compute negatives in chunks to control memory
-          neg_logits_chunks = []
-          max_chunk = 4096  # tune as needed
-          # print("K is ", K)
-          
-          for start in range(0, K, max_chunk):
-            end = min(start + max_chunk, K)
-            cand = dest_neg[:, start:end]              # [B, k]
-            k = cand.shape[1]
-            if k == 0:
-                continue
-            # tile users/timestamps to match k negatives
-            src_rep = np.repeat(sources_np, k)
-            ts_rep  = np.repeat(timestamps_np, k)
-            cand_r  = cand.reshape(-1)
-            edge_rep = None if edge_idxs_np is None else np.repeat(edge_idxs_np, k)
-
-            # We only need the destination embeddings here; use compute_temporal_embeddings
-            # with dummy negatives again. Memory is frozen by the context manager.
-            src_e_neg, dst_neg_e, _ = self.compute_temporal_embeddings(
-                src_rep, cand_r, src_rep, ts_rep, edge_rep, n_neighbors
-            )
-            # score
-            # print("computing logits")
-            logits = self.affinity_score(src_e_neg, dst_neg_e).view(B, k)
-            neg_logits_chunks.append(logits)
-
-          
-          neg_logits = torch.cat(neg_logits_chunks, dim=1) if neg_logits_chunks else \
-                      torch.empty(B, 0, device=pos_logits.device, dtype=pos_logits.dtype)
-
-      return pos_logits, neg_logits
-
-
-  @torch.no_grad()
-  def commit_positive_update(
-      self,
-      sources, destinations, timestamps, edge_idxs=None, n_neighbors=20
-  ):
-      """
-      Advance memory/time exactly once using your standard path.
-      We call the usual compute_edge_probabilities but discard its logits.
-      This keeps behavior identical to your current single-edge update.
-      """
-      _ = self.compute_edge_probabilities(
-          sources, destinations, destinations,  # negatives ignored
-          timestamps, edge_idxs, n_neighbors
-      )
-      return None
-  # -----------------------------------------------------------------------
-
 
   def compute_temporal_embeddings(self, source_nodes, destination_nodes, negative_nodes, edge_times,
                                   edge_idxs, n_neighbors=20):
@@ -298,12 +128,8 @@ class TGN(torch.nn.Module):
     if self.use_memory:
       if self.memory_update_at_start:
         # Update memory for all nodes with messages stored in previous batches
-        if not self._suppress_memory_updates:
-          memory, last_update = self.get_updated_memory(list(range(self.n_nodes)),
-                                                        self.memory.messages)
-        else:
-          memory = self.memory.get_memory(list(range(self.n_nodes)))
-          last_update = self.memory.last_update
+        memory, last_update = self.get_updated_memory(list(range(self.n_nodes)),
+                                                      self.memory.messages)
       else:
         memory = self.memory.get_memory(list(range(self.n_nodes)))
         last_update = self.memory.last_update
@@ -335,7 +161,7 @@ class TGN(torch.nn.Module):
     destination_node_embedding = node_embedding[n_samples: 2 * n_samples]
     negative_node_embedding = node_embedding[2 * n_samples:]
 
-    if self.use_memory and not self._suppress_memory_updates:
+    if self.use_memory:
       if self.memory_update_at_start:
         # Persist the updates to the memory only for sources and destinations (since now we have
         # new messages for them)
@@ -365,14 +191,9 @@ class TGN(torch.nn.Module):
         self.update_memory(unique_destinations, destination_id_to_messages)
 
       if self.dyrep:
-        def _project_mem(x):
-          if self.memory_projector is not None:
-            return self.memory_projector(x)
-          return x
-
-        source_node_embedding = _project_mem(memory[source_nodes])
-        destination_node_embedding = _project_mem(memory[destination_nodes])
-        negative_node_embedding = _project_mem(memory[negative_nodes])
+        source_node_embedding = memory[source_nodes]
+        destination_node_embedding = memory[destination_nodes]
+        negative_node_embedding = memory[negative_nodes]
 
     return source_node_embedding, destination_node_embedding, negative_node_embedding
 
@@ -394,9 +215,9 @@ class TGN(torch.nn.Module):
     source_node_embedding, destination_node_embedding, negative_node_embedding = self.compute_temporal_embeddings(
       source_nodes, destination_nodes, negative_nodes, edge_times, edge_idxs, n_neighbors)
 
+    
     score = self.affinity_score(torch.cat([source_node_embedding, source_node_embedding], dim=0),
-                                torch.cat([destination_node_embedding,
-                                           negative_node_embedding])).squeeze(dim=0)
+                                torch.cat([destination_node_embedding, negative_node_embedding])).squeeze(dim=0)
     pos_score = score[:n_samples]
     neg_score = score[n_samples:]
 

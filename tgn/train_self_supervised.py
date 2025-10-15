@@ -67,6 +67,10 @@ parser.add_argument('--use_source_embedding_in_message', action='store_true',
                     help='Whether to use the embedding of the source node as part of the message')
 parser.add_argument('--dyrep', action='store_true',
                     help='Whether to run the dyrep model')
+parser.add_argument('--freeze_memory_during_loss', action='store_true',
+                    help='Freeze memory state while computing loss (slower but safer for many-neg training).')
+parser.add_argument('--many_neg_scorer', action='store_true',
+                    help='Use the many-negative scorer variant (slower; enables weighted BCE).')
 parser.add_argument('--num_neg', type=int, default=1,
                     help='Number of negative samples per positive interaction')
 parser.add_argument('--use_weighted_bce', action='store_true',
@@ -115,6 +119,8 @@ MEMORY_DIM = args.memory_dim
 ADV_SAMP = args.adv_sampler
 SAMPLER_TYPE = args.negative_sampler
 ADV_TYPE = args.adv_type
+FREEZE_MEMORY = args.freeze_memory_during_loss
+USE_MANY_NEG = args.many_neg_scorer
 
 Path("./saved_models/").mkdir(parents=True, exist_ok=True)
 Path("./saved_checkpoints/").mkdir(parents=True, exist_ok=True)
@@ -272,7 +278,13 @@ for i in range(args.n_runs):
 
         tgn = tgn.train()
 
-        if args.use_weighted_bce:
+        if args.use_weighted_bce and not USE_MANY_NEG:
+          logger.warning("--use_weighted_bce requested but --many_neg_scorer not enabled; falling back to classic scorer.")
+
+        scorer_kwargs = dict(n_neighbors=NUM_NEIGHBORS,
+                             freeze_memory=FREEZE_MEMORY) if USE_MANY_NEG else dict()
+
+        if USE_MANY_NEG and args.use_weighted_bce:
           # New path: gather logits with frozen memory, apply weighted BCE with K negatives per positive.
           # print("getting edges to compute probabilities")
           pos_logits, neg_logits = tgn.compute_edge_logits_many_negs_no_update(
@@ -281,7 +293,7 @@ for i in range(args.n_runs):
               negatives_batch,
               timestamps_batch,
               edge_idxs_batch,
-              NUM_NEIGHBORS,
+              **scorer_kwargs,
           )
           pos_logits = pos_logits.view(-1)
           neg_logits = neg_logits.view(size * NUM_NEG)
@@ -295,7 +307,7 @@ for i in range(args.n_runs):
             torch.full_like(neg_logits, args.neg_loss_weight)
           ], dim=0)
           micro_loss = F.binary_cross_entropy_with_logits(logits, targets, weight=weights)
-        else:
+        elif USE_MANY_NEG:
           # Original computation retained as fallback (single negative per positive by default).
           # pos_prob, neg_prob = tgn.compute_edge_probabilities(sources_batch, destinations_batch, negatives_batch,
           #                                                     timestamps_batch, edge_idxs_batch, NUM_NEIGHBORS)
@@ -305,12 +317,27 @@ for i in range(args.n_runs):
               negatives_batch,
               timestamps_batch,
               edge_idxs_batch,
-              NUM_NEIGHBORS,
+              **scorer_kwargs,
           )
           pos_prob = torch.sigmoid(pos_logits)
           neg_prob = torch.sigmoid(neg_logits)
           w_pos = 1.0
           w_neg = 1.0   # or >1.0 if you want to emphasize negatives; you can also scale by K
+          pos_loss = - (w_pos * torch.log(pos_prob.clamp_min(1e-12))).mean()
+          neg_loss = - (w_neg * torch.log((1.0 - neg_prob).clamp_min(1e-12))).mean()
+          micro_loss = pos_loss + neg_loss
+        else:
+          negatives_for_loss = negatives_batch[:, 0] if hasattr(negatives_batch, "ndim") and getattr(negatives_batch, "ndim", 1) > 1 else negatives_batch
+          pos_prob, neg_prob = tgn.compute_edge_probabilities(
+              sources_batch,
+              destinations_batch,
+              negatives_for_loss,
+              timestamps_batch,
+              edge_idxs_batch,
+              NUM_NEIGHBORS,
+          )
+          w_pos = 1.0
+          w_neg = 1.0
           pos_loss = - (w_pos * torch.log(pos_prob.clamp_min(1e-12))).mean()
           neg_loss = - (w_neg * torch.log((1.0 - neg_prob).clamp_min(1e-12))).mean()
           micro_loss = pos_loss + neg_loss
@@ -344,7 +371,7 @@ for i in range(args.n_runs):
 
       # Detach memory after 'args.backprop_every' number of batches so we don't backpropagate to
       # the start of time
-      if USE_MEMORY:
+      if USE_MEMORY and USE_MANY_NEG and FREEZE_MEMORY:
         tgn.memory.detach_memory()
         with torch.no_grad():
           for src_b, dst_b, ts_b, edge_idx_b in commit_batches:
@@ -352,6 +379,8 @@ for i in range(args.n_runs):
                 src_b, dst_b, ts_b,
                 edge_idx_b, NUM_NEIGHBORS
             )
+      elif USE_MEMORY:
+        tgn.memory.detach_memory()
 
     exp_logger.close_epoch_bar()
     epoch_time = time.time() - start_epoch
