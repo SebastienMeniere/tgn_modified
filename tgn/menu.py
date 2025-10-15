@@ -10,7 +10,7 @@ from typing import Optional
 import numpy as np
 import torch
 
-from utils.utils import AdvancedNegativeSampler, get_neighbor_finder
+from utils.utils import AdvancedNegativeSampler, RandEdgeSampler, get_neighbor_finder
 from utils.data_processing import get_data, compute_time_statistics
 from model.tgn import TGN
 
@@ -249,9 +249,10 @@ def inference_flow() -> None:
         return
 
     demo_k = min(5, len(test_data.sources))
-    neg_sampler = AdvancedNegativeSampler(context["full_data"].sources,
-                                          context["full_data"].destinations,
-                                          seed=42)
+    sampler_cls = AdvancedNegativeSampler if metadata.get("training_args", {}).get("negative_sampler") == "advanced" else RandEdgeSampler
+    neg_sampler = sampler_cls(context["full_data"].sources,
+                              context["full_data"].destinations,
+                              seed=42)
     _, neg_samples = neg_sampler.sample(demo_k)
 
     with torch.no_grad():

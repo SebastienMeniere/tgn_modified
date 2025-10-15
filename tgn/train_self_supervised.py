@@ -80,7 +80,12 @@ parser.add_argument('--snapshot_quantiles', type=int, default=3, help='Number of
 parser.add_argument('--snapshot_quantile_mode', type=str, default='per_node', choices=['per_node','global'], help='Quantile mode for snapshot timepoints')
 parser.add_argument('--snapshot_full_timeline', action='store_true', help='Use full neighbor finder and full-data timestamps for snapshotting')
 parser.add_argument('--adv_sampler', action='store_true', help='Turning the advanced sampler on or off')
-parser.add_argument('--adv_type', type=str, default='filtered_random', choices=['popularity_biased', 'temporal_aware'])
+parser.add_argument('--negative_sampler', type=str, default='random',
+                    choices=['random', 'advanced'],
+                    help='Negative sampling backend: fast random (default) or advanced strategies.')
+parser.add_argument('--adv_type', type=str, default='filtered_random',
+                    choices=['filtered_random', 'popularity_biased', 'temporal_aware'],
+                    help='Advanced sampler strategy (only used when --negative_sampler=advanced).')
 
 try:
   args = parser.parse_args()
@@ -108,6 +113,7 @@ USE_MEMORY = args.use_memory
 MESSAGE_DIM = args.message_dim
 MEMORY_DIM = args.memory_dim
 ADV_SAMP = args.adv_sampler
+SAMPLER_TYPE = args.negative_sampler
 ADV_TYPE = args.adv_type
 
 Path("./saved_models/").mkdir(parents=True, exist_ok=True)
@@ -154,23 +160,19 @@ full_ngh_finder = get_neighbor_finder(full_data, args.uniform)
 
 
 # Initialize negative samplers. Set seeds for validation and testing so negatives are the same
-# across different runs
-# NB: in the inductive setting, negatives are sampled only amongst other new nodes
-# train_rand_sampler = RandEdgeSampler(train_data.sources, train_data.destinations)
-# val_rand_sampler = RandEdgeSampler(full_data.sources, full_data.destinations, seed=0)
-# nn_val_rand_sampler = RandEdgeSampler(new_node_val_data.sources, new_node_val_data.destinations,
-#                                       seed=1)
-# test_rand_sampler = RandEdgeSampler(full_data.sources, full_data.destinations, seed=2)
-# nn_test_rand_sampler = RandEdgeSampler(new_node_test_data.sources,
-#                                        new_node_test_data.destinations,
-#                                        seed=3)
+# across different runs. In the inductive setting, negatives are sampled only amongst other new nodes.
+def build_sampler(src, dst, seed=None):
+  if SAMPLER_TYPE == 'advanced':
+    return AdvancedNegativeSampler(src, dst, seed=seed, strategy=ADV_TYPE)
+  return RandEdgeSampler(src, dst, seed=seed)
 
-train_rand_sampler = AdvancedNegativeSampler(train_data.sources, train_data.destinations, strategy=ADV_TYPE)
-val_rand_sampler = AdvancedNegativeSampler(full_data.sources, full_data.destinations, seed=0, strategy=ADV_TYPE)
-nn_val_rand_sampler = AdvancedNegativeSampler(new_node_val_data.sources, new_node_val_data.destinations, seed=1, strategy=ADV_TYPE)
-test_rand_sampler = AdvancedNegativeSampler(full_data.sources, full_data.destinations, seed=2, strategy=ADV_TYPE)
-nn_test_rand_sampler = AdvancedNegativeSampler(new_node_test_data.sources, new_node_test_data.destinations, seed=3, strategy=ADV_TYPE)
-# Set device
+
+train_rand_sampler = build_sampler(train_data.sources, train_data.destinations)
+val_rand_sampler = build_sampler(full_data.sources, full_data.destinations, seed=0)
+nn_val_rand_sampler = build_sampler(new_node_val_data.sources, new_node_val_data.destinations, seed=1)
+test_rand_sampler = build_sampler(full_data.sources, full_data.destinations, seed=2)
+nn_test_rand_sampler = build_sampler(new_node_test_data.sources, new_node_test_data.destinations, seed=3)
+# # Set device
 device_string = 'cuda:{}'.format(GPU) if torch.cuda.is_available() else 'cpu'
 device = torch.device(device_string)
 
