@@ -26,6 +26,7 @@ parser.add_argument('-d', '--data', type=str, help='Dataset name (eg. wikipedia 
 parser.add_argument('--data_dir', type=str, dest='data_dir', default='../data/processed',
                     help='Directory containing preprocessed dataset files (CSV/NPY).')
 parser.add_argument('--bs', type=int, default=200, help='Batch_size')
+parser.add_argument('--eval_bs', type=int, default=None, help='Evaluation batch size (defaults to training batch size)')
 parser.add_argument('--prefix', type=str, default='', help='Prefix to name the checkpoints')
 parser.add_argument('--n_degree', type=int, default=20, help='Number of neighbors to sample')
 parser.add_argument('--n_head', type=int, default=1, help='Number of heads used in attention layer')
@@ -102,6 +103,7 @@ if not DATA_DIR.exists():
   raise SystemExit(f"Data directory '{DATA_DIR}' does not exist")
 
 BATCH_SIZE = args.bs
+EVAL_BATCH_SIZE = args.eval_bs if args.eval_bs is not None else args.bs
 NUM_NEIGHBORS = args.n_degree
 NUM_NEG = max(1, args.num_neg)
 NUM_EPOCH = args.n_epoch
@@ -425,6 +427,7 @@ for i in range(args.n_runs):
                                                             negative_edge_sampler=val_rand_sampler,
                                                             data=val_data,
                                                             n_neighbors=NUM_NEIGHBORS,
+                                                            batch_size=EVAL_BATCH_SIZE,
                                                             progress=True, desc=f"Val {epoch+1}/{NUM_EPOCH}")
     if USE_MEMORY:
       val_memory_backup = tgn.memory.backup_memory()
@@ -438,6 +441,7 @@ for i in range(args.n_runs):
                                                                         negative_edge_sampler=val_rand_sampler,
                                                                         data=new_node_val_data,
                                                                         n_neighbors=NUM_NEIGHBORS,
+                                                                        batch_size=EVAL_BATCH_SIZE,
                                                                         progress=True, desc=f"NewNode Val {epoch+1}/{NUM_EPOCH}")
 
     if USE_MEMORY:
@@ -496,6 +500,7 @@ for i in range(args.n_runs):
                                                               negative_edge_sampler=test_rand_sampler,
                                                               data=test_data,
                                                               n_neighbors=NUM_NEIGHBORS,
+                                                              batch_size=EVAL_BATCH_SIZE,
                                                               progress=True, desc="Test")
 
   if USE_MEMORY:
@@ -506,6 +511,7 @@ for i in range(args.n_runs):
                                                                           negative_edge_sampler=nn_test_rand_sampler,
                                                                           data=new_node_test_data,
                                                                           n_neighbors=NUM_NEIGHBORS,
+                                                                          batch_size=EVAL_BATCH_SIZE,
                                                                           progress=True, desc="NewNode Test")
 
   logger.info(
