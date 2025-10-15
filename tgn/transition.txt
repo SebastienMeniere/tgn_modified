@@ -1,0 +1,1 @@
+poetry run python train_self_supervised.py -d synthetic/synthetic --prefix attn_id_synth2 --snapshot --n_epoch 5  --node_dim 32 --time_dim 16 --message_dim 8 --memory_dim 8 --n_layer 1 --bs 2 --n_degree 50 --n_layer 1 --aggregator mean --snapshot_quantiles 15
