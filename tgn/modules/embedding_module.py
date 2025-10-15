@@ -1,7 +1,7 @@
+import math
+import numpy as np
 import torch
 from torch import nn
-import numpy as np
-import math
 
 from model.temporal_attention import TemporalAttentionLayer
 
@@ -9,11 +9,10 @@ from model.temporal_attention import TemporalAttentionLayer
 class EmbeddingModule(nn.Module):
   def __init__(self, node_features, edge_features, memory, neighbor_finder, time_encoder, n_layers,
                n_node_features, n_edge_features, n_time_features, embedding_dimension, device,
-               dropout, memory_projector=None, node_projector=None):
-    super(EmbeddingModule, self).__init__()
+               dropout, *, use_memory=True, memory_projector=None):
+    super().__init__()
     self.node_features = node_features
     self.edge_features = edge_features
-    # self.memory = memory
     self.neighbor_finder = neighbor_finder
     self.time_encoder = time_encoder
     self.n_layers = n_layers
@@ -23,32 +22,49 @@ class EmbeddingModule(nn.Module):
     self.dropout = dropout
     self.embedding_dimension = embedding_dimension
     self.device = device
-    self.memory_projector = memory_projector
-    self.node_projector = node_projector
+    self.use_memory = use_memory
+    if self.use_memory:
+      self.memory_projector = memory_projector if memory_projector is not None else nn.Identity()
+    else:
+      self.memory_projector = None
 
   def compute_embedding(self, memory, source_nodes, timestamps, n_layers, n_neighbors=20, time_diffs=None,
                         use_time_proj=True):
-    return NotImplemented
+    raise NotImplementedError
+
+  @staticmethod
+  def _tensor_from_memory(memory_obj_or_tensor):
+    if memory_obj_or_tensor is None:
+      return None
+    if isinstance(memory_obj_or_tensor, torch.Tensor):
+      return memory_obj_or_tensor
+    if hasattr(memory_obj_or_tensor, "memory"):
+      return memory_obj_or_tensor.memory
+    raise TypeError(f"Unsupported memory container: {type(memory_obj_or_tensor)}")
 
 
 class IdentityEmbedding(EmbeddingModule):
   def compute_embedding(self, memory, source_nodes, timestamps, n_layers, n_neighbors=20, time_diffs=None,
                         use_time_proj=True):
-    mem = memory[source_nodes, :]
+    if memory is None:
+      raise ValueError("IdentityEmbedding requires memory to be enabled.")
+    mem_tensor = self._tensor_from_memory(memory)
+    idx = torch.as_tensor(source_nodes, device=mem_tensor.device, dtype=torch.long)
+    emb = mem_tensor[idx, :]
     if self.memory_projector is not None:
-      mem = self.memory_projector(mem)
-    return mem
+      emb = self.memory_projector(emb)
+    return emb
 
 
 class TimeEmbedding(EmbeddingModule):
   def __init__(self, node_features, edge_features, memory, neighbor_finder, time_encoder, n_layers,
                n_node_features, n_edge_features, n_time_features, embedding_dimension, device,
-               n_heads=2, dropout=0.1, use_memory=True, n_neighbors=1, memory_projector=None, node_projector=None):
-    super(TimeEmbedding, self).__init__(node_features, edge_features, memory,
-                                        neighbor_finder, time_encoder, n_layers,
-                                        n_node_features, n_edge_features, n_time_features,
-                                        embedding_dimension, device, dropout,
-                                        memory_projector, node_projector)
+               n_heads=2, dropout=0.1, use_memory=True, n_neighbors=1, memory_projector=None):
+    super().__init__(node_features, edge_features, memory,
+                     neighbor_finder, time_encoder, n_layers,
+                     n_node_features, n_edge_features, n_time_features,
+                     embedding_dimension, device, dropout,
+                     use_memory=use_memory, memory_projector=memory_projector)
 
     class NormalLinear(nn.Linear):
       # From Jodie code
@@ -58,191 +74,197 @@ class TimeEmbedding(EmbeddingModule):
         if self.bias is not None:
           self.bias.data.normal_(0, stdv)
 
-    self.embedding_layer = NormalLinear(1, self.n_node_features)
+    self.embedding_layer = NormalLinear(1, self.embedding_dimension)
 
   def compute_embedding(self, memory, source_nodes, timestamps, n_layers, n_neighbors=20, time_diffs=None,
                         use_time_proj=True):
-    mem = memory[source_nodes, :]
+    if memory is None:
+      raise ValueError("TimeEmbedding requires memory to be enabled.")
+    if time_diffs is None:
+      raise ValueError("TimeEmbedding expects time_diffs tensor.")
+
+    mem_tensor = self._tensor_from_memory(memory)
+    idx = torch.as_tensor(source_nodes, device=mem_tensor.device, dtype=torch.long)
+    mem = mem_tensor[idx, :]
     if self.memory_projector is not None:
       mem = self.memory_projector(mem)
-    source_embeddings = mem * (1 + self.embedding_layer(time_diffs.unsqueeze(1)))
 
+    time_factor = self.embedding_layer(time_diffs.unsqueeze(1))
+    source_embeddings = mem * (1 + time_factor)
     return source_embeddings
 
 
 class GraphEmbedding(EmbeddingModule):
   def __init__(self, node_features, edge_features, memory, neighbor_finder, time_encoder, n_layers,
                n_node_features, n_edge_features, n_time_features, embedding_dimension, device,
-               n_heads=2, dropout=0.1, use_memory=True, memory_projector=None, node_projector=None):
-    super(GraphEmbedding, self).__init__(node_features, edge_features, memory,
-                                         neighbor_finder, time_encoder, n_layers,
-                                         n_node_features, n_edge_features, n_time_features,
-                                         embedding_dimension, device, dropout,
-                                         memory_projector, node_projector)
+               n_heads=2, dropout=0.1, use_memory=True, memory_projector=None):
+    super().__init__(node_features, edge_features, memory,
+                     neighbor_finder, time_encoder, n_layers,
+                     n_node_features, n_edge_features, n_time_features,
+                     embedding_dimension, device, dropout,
+                     use_memory=use_memory, memory_projector=memory_projector)
 
     self.use_memory = use_memory
     self.device = device
+    self.node_proj = nn.Linear(node_features.shape[1], embedding_dimension, bias=False)
+    self.edge_proj = nn.Linear(n_edge_features, embedding_dimension, bias=False)
+    self.time_proj = nn.Linear(n_time_features, embedding_dimension, bias=False)
+
+  def _project_memory(self, memory, index_tensor):
+    if not self.use_memory:
+      return None
+    mem_tensor = self._tensor_from_memory(memory)
+    if mem_tensor is None:
+      return None
+    mem = mem_tensor[index_tensor]
+    if self.memory_projector is not None:
+      mem = self.memory_projector(mem)
+    return mem
 
   def compute_embedding(self, memory, source_nodes, timestamps, n_layers, n_neighbors=20, time_diffs=None,
                         use_time_proj=True):
-    """Recursive implementation of curr_layers temporal graph attention layers.
+    assert n_layers >= 0
 
-    src_idx_l [batch_size]: users / items input ids.
-    cut_time_l [batch_size]: scalar representing the instant of the time where we want to extract the user / item representation.
-    curr_layers [scalar]: number of temporal convolutional layers to stack.
-    num_neighbors [scalar]: number of temporal neighbor to consider in each convolutional layer.
-    """
+    src_t = torch.from_numpy(source_nodes).long().to(self.device)
+    ts_t = torch.from_numpy(timestamps).float().to(self.device).unsqueeze(1)
 
-    assert (n_layers >= 0)
-    
-    source_nodes_torch = torch.from_numpy(source_nodes).long().to(self.device)
-    timestamps_torch = torch.unsqueeze(torch.from_numpy(timestamps).float().to(self.device), dim=1)
+    # Δt = 0 for the query node
+    src_time_emb = self.time_proj(self.time_encoder(torch.zeros_like(ts_t)))
 
-    # query node always has the start time -> time span == 0
-    source_nodes_time_embedding = self.time_encoder(torch.zeros_like(
-      timestamps_torch))
-
-    # Raw node features then optional learned projection
-    source_node_features = self.node_features[source_nodes_torch, :]
-    if self.node_projector is not None:
-      source_node_features = self.node_projector(source_node_features)
+    h_src = self.node_proj(self.node_features[src_t])
     if self.use_memory:
-      mem = memory[source_nodes, :]
-      if self.memory_projector is not None:
-        mem = self.memory_projector(mem)
-      source_node_features = mem + source_node_features
+      mem = self._project_memory(memory, src_t)
+      if mem is not None:
+        h_src = h_src + mem
 
     if n_layers == 0:
-      return source_node_features
-    else:
+      return h_src
 
-      source_node_conv_embeddings = self.compute_embedding(memory,
-                                                           source_nodes,
-                                                           timestamps,
-                                                           n_layers=n_layers - 1,
-                                                           n_neighbors=n_neighbors)
+    h_src_conv = self.compute_embedding(memory, source_nodes, timestamps,
+                                        n_layers=n_layers - 1,
+                                        n_neighbors=n_neighbors)
 
-      neighbors, edge_idxs, edge_times = self.neighbor_finder.get_temporal_neighbor(
-        source_nodes,
-        timestamps,
-        n_neighbors=n_neighbors)
+    neighbors, edge_idxs, edge_times = self.neighbor_finder.get_temporal_neighbor(
+      source_nodes,
+      timestamps,
+      n_neighbors=n_neighbors)
 
-      neighbors_torch = torch.from_numpy(neighbors).long().to(self.device)
+    neighbors_torch = torch.from_numpy(neighbors).long().to(self.device)
+    edge_idxs_torch = torch.from_numpy(edge_idxs).long().to(self.device)
 
-      edge_idxs = torch.from_numpy(edge_idxs).long().to(self.device)
+    edge_deltas = timestamps[:, np.newaxis] - edge_times
+    edge_deltas_torch = torch.from_numpy(edge_deltas).float().to(self.device)
 
-      edge_deltas = timestamps[:, np.newaxis] - edge_times
+    neigh_flat = neighbors.flatten()
+    neighbor_embeddings = self.compute_embedding(memory,
+                                                 neigh_flat,
+                                                 np.repeat(timestamps, n_neighbors),
+                                                 n_layers=n_layers - 1,
+                                                 n_neighbors=n_neighbors)
 
-      edge_deltas_torch = torch.from_numpy(edge_deltas).float().to(self.device)
+    effective_n_neighbors = n_neighbors if n_neighbors > 0 else 1
+    neighbor_embeddings = neighbor_embeddings.view(len(source_nodes), effective_n_neighbors, -1)
 
-      neighbors = neighbors.flatten()
-      neighbor_embeddings = self.compute_embedding(memory,
-                                                   neighbors,
-                                                   np.repeat(timestamps, n_neighbors),
-                                                   n_layers=n_layers - 1,
-                                                   n_neighbors=n_neighbors)
+    edge_time_embeddings = self.time_proj(self.time_encoder(edge_deltas_torch))
+    edge_features = self.edge_proj(self.edge_features[edge_idxs_torch, :])
 
-      effective_n_neighbors = n_neighbors if n_neighbors > 0 else 1
-      neighbor_embeddings = neighbor_embeddings.view(len(source_nodes), effective_n_neighbors, -1)
-      edge_time_embeddings = self.time_encoder(edge_deltas_torch)
+    mask = neighbors_torch == 0
 
-      edge_features = self.edge_features[edge_idxs, :]
+    source_embedding = self.aggregate(n_layers, h_src_conv,
+                                      src_time_emb,
+                                      neighbor_embeddings,
+                                      edge_time_embeddings,
+                                      edge_features,
+                                      mask)
 
-      mask = neighbors_torch == 0
+    return source_embedding
 
-      source_embedding = self.aggregate(n_layers, source_node_conv_embeddings,
-                                        source_nodes_time_embedding,
-                                        neighbor_embeddings,
-                                        edge_time_embeddings,
-                                        edge_features,
-                                        mask)
-
-      return source_embedding
-
-  def aggregate(self, n_layers, source_node_features, source_nodes_time_embedding,
+  def aggregate(self, n_layer, source_node_features, source_nodes_time_embedding,
                 neighbor_embeddings,
                 edge_time_embeddings, edge_features, mask):
-    return NotImplemented
+    raise NotImplementedError
 
 
 class GraphSumEmbedding(GraphEmbedding):
   def __init__(self, node_features, edge_features, memory, neighbor_finder, time_encoder, n_layers,
                n_node_features, n_edge_features, n_time_features, embedding_dimension, device,
-               n_heads=2, dropout=0.1, use_memory=True, memory_projector=None, node_projector=None):
-    super(GraphSumEmbedding, self).__init__(node_features=node_features,
-                                            edge_features=edge_features,
-                                            memory=memory,
-                                            neighbor_finder=neighbor_finder,
-                                            time_encoder=time_encoder, n_layers=n_layers,
-                                            n_node_features=n_node_features,
-                                            n_edge_features=n_edge_features,
-                                            n_time_features=n_time_features,
-                                            embedding_dimension=embedding_dimension,
-                                            device=device,
-                                            n_heads=n_heads, dropout=dropout,
-                                            use_memory=use_memory,
-                                            memory_projector=memory_projector,
-                                            node_projector=node_projector)
-    self.linear_1 = torch.nn.ModuleList([torch.nn.Linear(embedding_dimension + n_time_features +
-                                                         n_edge_features, embedding_dimension)
-                                         for _ in range(n_layers)])
-    self.linear_2 = torch.nn.ModuleList(
-      [torch.nn.Linear(embedding_dimension + n_node_features + n_time_features,
-                       embedding_dimension) for _ in range(n_layers)])
+               n_heads=2, dropout=0.1, use_memory=True, memory_projector=None):
+    super().__init__(node_features=node_features,
+                     edge_features=edge_features,
+                     memory=memory,
+                     neighbor_finder=neighbor_finder,
+                     time_encoder=time_encoder, n_layers=n_layers,
+                     n_node_features=n_node_features,
+                     n_edge_features=n_edge_features,
+                     n_time_features=n_time_features,
+                     embedding_dimension=embedding_dimension,
+                     device=device,
+                     n_heads=n_heads, dropout=dropout,
+                     use_memory=use_memory,
+                     memory_projector=memory_projector)
+
+    D = embedding_dimension
+    self.linear_1 = nn.ModuleList([
+      nn.Linear(3 * D, D) for _ in range(n_layers)
+    ])
+    self.linear_2 = nn.ModuleList([
+      nn.Linear(3 * D, D) for _ in range(n_layers)
+    ])
 
   def aggregate(self, n_layer, source_node_features, source_nodes_time_embedding,
                 neighbor_embeddings,
                 edge_time_embeddings, edge_features, mask):
-    neighbors_features = torch.cat([neighbor_embeddings, edge_time_embeddings, edge_features],
-                                   dim=2)
+    neighbors_features = torch.cat([neighbor_embeddings, edge_time_embeddings, edge_features], dim=2)
     neighbor_embeddings = self.linear_1[n_layer - 1](neighbors_features)
-    neighbors_sum = torch.nn.functional.relu(torch.sum(neighbor_embeddings, dim=1))
+    neighbors_mean = torch.nn.functional.relu(torch.mean(neighbor_embeddings, dim=1))
 
     source_features = torch.cat([source_node_features,
-                                 source_nodes_time_embedding.squeeze()], dim=1)
-    source_embedding = torch.cat([neighbors_sum, source_features], dim=1)
-    source_embedding = self.linear_2[n_layer - 1](source_embedding)
+                                 source_nodes_time_embedding.squeeze(1)], dim=1)
+    combined = torch.cat([neighbors_mean, source_features], dim=1)
+    source_embedding = self.linear_2[n_layer - 1](combined)
     source_embedding = torch.nn.functional.layer_norm(
       source_embedding, source_embedding.shape[-1:])
-    
     return source_embedding
 
 
 class GraphAttentionEmbedding(GraphEmbedding):
   def __init__(self, node_features, edge_features, memory, neighbor_finder, time_encoder, n_layers,
                n_node_features, n_edge_features, n_time_features, embedding_dimension, device,
-               n_heads=2, dropout=0.1, use_memory=True, memory_projector=None , node_projector=None):
-    super(GraphAttentionEmbedding, self).__init__(node_features, edge_features, memory,
-                                                  neighbor_finder, time_encoder, n_layers,
-                                                  n_node_features, n_edge_features,
-                                                  n_time_features,
-                                                  embedding_dimension, device,
-                                                  n_heads, dropout,
-                                                  use_memory,
-                                                  memory_projector, node_projector)
+               n_heads=2, dropout=0.1, use_memory=True, memory_projector=None):
+    super().__init__(node_features=node_features,
+                     edge_features=edge_features,
+                     memory=memory,
+                     neighbor_finder=neighbor_finder,
+                     time_encoder=time_encoder, n_layers=n_layers,
+                     n_node_features=n_node_features,
+                     n_edge_features=n_edge_features,
+                     n_time_features=n_time_features,
+                     embedding_dimension=embedding_dimension,
+                     device=device,
+                     n_heads=n_heads, dropout=dropout,
+                     use_memory=use_memory,
+                     memory_projector=memory_projector)
 
-    self.attention_models = torch.nn.ModuleList([TemporalAttentionLayer(
-      n_node_features=n_node_features,
-      n_neighbors_features=n_node_features,
-      n_edge_features=n_edge_features,
-      time_dim=n_time_features,
+    self.attention_models = nn.ModuleList([TemporalAttentionLayer(
+      n_node_features=embedding_dimension,
+      n_neighbors_features=embedding_dimension,
+      n_edge_features=embedding_dimension,
+      time_dim=embedding_dimension,
       n_head=n_heads,
       dropout=dropout,
-      output_dimension=n_node_features)
+      output_dimension=embedding_dimension)
       for _ in range(n_layers)])
 
   def aggregate(self, n_layer, source_node_features, source_nodes_time_embedding,
                 neighbor_embeddings,
                 edge_time_embeddings, edge_features, mask):
     attention_model = self.attention_models[n_layer - 1]
-
     source_embedding, _ = attention_model(source_node_features,
                                           source_nodes_time_embedding,
                                           neighbor_embeddings,
                                           edge_time_embeddings,
                                           edge_features,
                                           mask)
-
     source_embedding = torch.nn.functional.layer_norm(
       source_embedding, source_embedding.shape[-1:])
     return source_embedding
@@ -252,36 +274,35 @@ def get_embedding_module(module_type, node_features, edge_features, memory, neig
                          time_encoder, n_layers, n_node_features, n_edge_features, n_time_features,
                          embedding_dimension, device,
                          n_heads=2, dropout=0.1, n_neighbors=None,
-                         use_memory=True, memory_projector=None, node_projector=None):
+                         use_memory=True, memory_projector=None):
   if module_type == "graph_attention":
     return GraphAttentionEmbedding(node_features=node_features,
-                                    edge_features=edge_features,
-                                    memory=memory,
-                                    neighbor_finder=neighbor_finder,
-                                    time_encoder=time_encoder,
-                                    n_layers=n_layers,
-                                    n_node_features=n_node_features,
-                                    n_edge_features=n_edge_features,
-                                    n_time_features=n_time_features,
-                                    embedding_dimension=embedding_dimension,
-                                    device=device,
-                                    n_heads=n_heads, dropout=dropout, use_memory=use_memory,
-                                    memory_projector=memory_projector, node_projector=node_projector)
+                                   edge_features=edge_features,
+                                   memory=memory,
+                                   neighbor_finder=neighbor_finder,
+                                   time_encoder=time_encoder,
+                                   n_layers=n_layers,
+                                   n_node_features=n_node_features,
+                                   n_edge_features=n_edge_features,
+                                   n_time_features=n_time_features,
+                                   embedding_dimension=embedding_dimension,
+                                   device=device,
+                                   n_heads=n_heads, dropout=dropout, use_memory=use_memory,
+                                   memory_projector=memory_projector)
   elif module_type == "graph_sum":
     return GraphSumEmbedding(node_features=node_features,
-                              edge_features=edge_features,
-                              memory=memory,
-                              neighbor_finder=neighbor_finder,
-                              time_encoder=time_encoder,
-                              n_layers=n_layers,
-                              n_node_features=n_node_features,
-                              n_edge_features=n_edge_features,
-                              n_time_features=n_time_features,
-                              embedding_dimension=embedding_dimension,
-                              device=device,
-                              n_heads=n_heads, dropout=dropout, use_memory=use_memory,
-                              memory_projector=memory_projector, node_projector=node_projector)
-
+                             edge_features=edge_features,
+                             memory=memory,
+                             neighbor_finder=neighbor_finder,
+                             time_encoder=time_encoder,
+                             n_layers=n_layers,
+                             n_node_features=n_node_features,
+                             n_edge_features=n_edge_features,
+                             n_time_features=n_time_features,
+                             embedding_dimension=embedding_dimension,
+                             device=device,
+                             n_heads=n_heads, dropout=dropout, use_memory=use_memory,
+                             memory_projector=memory_projector)
   elif module_type == "identity":
     return IdentityEmbedding(node_features=node_features,
                              edge_features=edge_features,
@@ -295,7 +316,8 @@ def get_embedding_module(module_type, node_features, edge_features, memory, neig
                              embedding_dimension=embedding_dimension,
                              device=device,
                              dropout=dropout,
-                             memory_projector=memory_projector, node_projector=node_projector)
+                             use_memory=use_memory,
+                             memory_projector=memory_projector)
   elif module_type == "time":
     return TimeEmbedding(node_features=node_features,
                          edge_features=edge_features,
@@ -309,7 +331,8 @@ def get_embedding_module(module_type, node_features, edge_features, memory, neig
                          embedding_dimension=embedding_dimension,
                          device=device,
                          dropout=dropout,
+                         use_memory=use_memory,
                          n_neighbors=n_neighbors,
-                         memory_projector=memory_projector, node_projector=node_projector)
+                         memory_projector=memory_projector)
   else:
-    raise ValueError("Embedding Module {} not supported".format(module_type))
+    raise ValueError(f"Embedding Module {module_type} not supported")
