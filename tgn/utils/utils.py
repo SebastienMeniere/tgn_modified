@@ -3,6 +3,23 @@ import torch
 from collections import defaultdict
 
 
+def _fast_unique(values):
+  """
+  More scalable unique helper that avoids the O(n log n) numpy sort on large arrays
+  by delegating to torch.unique when we have millions of entries.
+  """
+  arr = np.asarray(values)
+
+  if arr.ndim == 0:
+    return arr.reshape(1)
+
+  if arr.size > 2_000_000 and arr.dtype.kind in {"i", "u", "f"}:
+    tensor = torch.as_tensor(arr)
+    return torch.unique(tensor, sorted=False).cpu().numpy()
+
+  return np.unique(arr)
+
+
 class MergeLayer(torch.nn.Module):
   def __init__(self, dim1, dim2, dim3, dim4):
     super().__init__()
@@ -68,8 +85,8 @@ class EarlyStopMonitor(object):
 class RandEdgeSampler(object):
   def __init__(self, src_list, dst_list, seed=None):
     self.seed = None
-    self.src_list = np.unique(src_list)
-    self.dst_list = np.unique(dst_list)
+    self.src_list = _fast_unique(src_list)
+    self.dst_list = _fast_unique(dst_list)
 
     if seed is not None:
       self.seed = seed
@@ -102,8 +119,8 @@ class FilteredRandEdgeSampler(object):
                           if None, will be computed from src_list and dst_list
         """
         self.seed = seed
-        self.src_list = np.unique(src_list)
-        self.dst_list = np.unique(dst_list)
+        self.src_list = _fast_unique(src_list)
+        self.dst_list = _fast_unique(dst_list)
         
         if seed is not None:
             self.random_state = np.random.RandomState(self.seed)
@@ -214,8 +231,8 @@ class AdvancedNegativeSampler(object):
             strategy: 'filtered_random', 'popularity_biased', 'temporal_aware'
         """
         self.seed = seed
-        self.src_list = np.unique(src_list)
-        self.dst_list = np.unique(dst_list)
+        self.src_list = _fast_unique(src_list)
+        self.dst_list = _fast_unique(dst_list)
         self.strategy = strategy
         self.existing_edges = set(zip(src_list, dst_list))
         
