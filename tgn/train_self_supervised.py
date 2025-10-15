@@ -355,16 +355,16 @@ for i in range(args.n_runs):
       loss.backward()
       optimizer.step()
 
-      for name, param in tgn.named_parameters():
-        if param.grad is None:
+      # for name, param in tgn.named_parameters():
+      #   if param.grad is None:
 
-          continue
-        if "memory_updater" in name:
-          logger.info(f"{name} grad_norm={param.grad.norm().item():.4e}")
-        if "message_function" in name:
-          logger.info(f"{name} grad_norm={param.grad.norm().item():.4e}")
-        if "message_aggregator" in name:
-          logger.info(f"{name} grad_norm={param.grad.norm().item():.4e}")
+      #     continue
+      #   if "memory_updater" in name:
+      #     logger.info(f"{name} grad_norm={param.grad.norm().item():.4e}")
+      #   if "message_function" in name:
+      #     logger.info(f"{name} grad_norm={param.grad.norm().item():.4e}")
+      #   if "message_aggregator" in name:
+      #     logger.info(f"{name} grad_norm={param.grad.norm().item():.4e}")
       
       m_loss.append(loss.item())
       exp_logger.update_epoch_bar(loss_value=loss.item())
