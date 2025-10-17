@@ -1,6 +1,7 @@
+import bisect
+from collections import defaultdict
 import numpy as np
 import torch
-from collections import defaultdict
 
 
 def _fast_unique(values):
@@ -105,6 +106,59 @@ class RandEdgeSampler(object):
   def reset_random_state(self):
     self.random_state = np.random.RandomState(self.seed)
 
+
+class HistoryEdgeSampler:
+  """
+  Negative sampler that avoids edges already observed before the current timestamp for each source.
+  """
+
+  def __init__(self, src, dst, ts, seed=None):
+    self.seed = seed
+    self.rng = np.random.RandomState(seed)
+    self.all_dst = _fast_unique(dst)
+
+    self.hist = defaultdict(list)
+    for s, d, t in zip(src, dst, ts):
+      self.hist[s].append((t, d))
+    for s in self.hist:
+      self.hist[s].sort(key=lambda x: x[0])
+
+  def reset_random_state(self):
+    self.rng = np.random.RandomState(self.seed)
+
+  def _seen_before(self, s, d, t):
+    pair_list = self.hist.get(s)
+    if not pair_list:
+      return False
+    idx = bisect.bisect_left(pair_list, (t, -1))
+    for _, dest in pair_list[:idx]:
+      if dest == d:
+        return True
+    return False
+
+  def sample_batch(self, src_batch, ts_batch, num_neg=1):
+    src_batch = np.asarray(src_batch)
+    ts_batch = np.asarray(ts_batch)
+    n = len(src_batch)
+    if num_neg <= 1:
+      negatives = np.empty(n, dtype=self.all_dst.dtype)
+    else:
+      negatives = np.empty((n, num_neg), dtype=self.all_dst.dtype)
+
+    for i, (s, t) in enumerate(zip(src_batch, ts_batch)):
+      for k in range(num_neg):
+        tries = 0
+        while True:
+          d = self.rng.choice(self.all_dst)
+          if not self._seen_before(s, d, t) or tries >= len(self.all_dst):
+            if num_neg <= 1:
+              negatives[i] = d
+            else:
+              negatives[i, k] = d
+            break
+          tries += 1
+
+    return src_batch, negatives
 
 class FilteredRandEdgeSampler(object):
     def __init__(self, src_list, dst_list, seed=None, existing_edges=None):

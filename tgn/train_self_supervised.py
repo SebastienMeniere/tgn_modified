@@ -12,7 +12,7 @@ from pathlib import Path
 
 from evaluation.evaluation import eval_edge_prediction
 from model.tgn import TGN
-from utils.utils import AdvancedNegativeSampler, EarlyStopMonitor, FilteredRandEdgeSampler, RandEdgeSampler, get_neighbor_finder
+from utils.utils import AdvancedNegativeSampler, EarlyStopMonitor, FilteredRandEdgeSampler, HistoryEdgeSampler, RandEdgeSampler, get_neighbor_finder
 from utils.experiment_logging import TGNExperimentLogger, SnapshotConfig
 from utils.data_processing import get_data, compute_time_statistics
 
@@ -86,8 +86,8 @@ parser.add_argument('--snapshot_quantile_mode', type=str, default='per_node', ch
 parser.add_argument('--snapshot_full_timeline', action='store_true', help='Use full neighbor finder and full-data timestamps for snapshotting')
 parser.add_argument('--adv_sampler', action='store_true', help='Turning the advanced sampler on or off')
 parser.add_argument('--negative_sampler', type=str, default='random',
-                    choices=['random', 'advanced'],
-                    help='Negative sampling backend: fast random (default) or advanced strategies.')
+                    choices=['random', 'advanced', 'history'],
+                    help='Negative sampling backend: fast random (default), advanced strategies, or history-aware.')
 parser.add_argument('--adv_type', type=str, default='filtered_random',
                     choices=['filtered_random', 'popularity_biased', 'temporal_aware'],
                     help='Advanced sampler strategy (only used when --negative_sampler=advanced).')
@@ -169,17 +169,19 @@ full_ngh_finder = get_neighbor_finder(full_data, args.uniform)
 
 # Initialize negative samplers. Set seeds for validation and testing so negatives are the same
 # across different runs. In the inductive setting, negatives are sampled only amongst other new nodes.
-def build_sampler(src, dst, seed=None):
+def build_sampler(src, dst, ts, seed=None):
   if SAMPLER_TYPE == 'advanced':
     return AdvancedNegativeSampler(src, dst, seed=seed, strategy=ADV_TYPE)
+  if SAMPLER_TYPE == 'history':
+    return HistoryEdgeSampler(src, dst, ts, seed=seed)
   return RandEdgeSampler(src, dst, seed=seed)
 
 
-train_rand_sampler = build_sampler(train_data.sources, train_data.destinations)
-val_rand_sampler = build_sampler(full_data.sources, full_data.destinations, seed=0)
-nn_val_rand_sampler = build_sampler(new_node_val_data.sources, new_node_val_data.destinations, seed=1)
-test_rand_sampler = build_sampler(full_data.sources, full_data.destinations, seed=2)
-nn_test_rand_sampler = build_sampler(new_node_test_data.sources, new_node_test_data.destinations, seed=3)
+train_rand_sampler = build_sampler(train_data.sources, train_data.destinations, train_data.timestamps)
+val_rand_sampler = build_sampler(full_data.sources, full_data.destinations, full_data.timestamps, seed=0)
+nn_val_rand_sampler = build_sampler(new_node_val_data.sources, new_node_val_data.destinations, new_node_val_data.timestamps, seed=1)
+test_rand_sampler = build_sampler(full_data.sources, full_data.destinations, full_data.timestamps, seed=2)
+nn_test_rand_sampler = build_sampler(new_node_test_data.sources, new_node_test_data.destinations, new_node_test_data.timestamps, seed=3)
 # # Set device
 device_string = 'cuda:{}'.format(GPU) if torch.cuda.is_available() else 'cpu'
 device = torch.device(device_string)
@@ -274,9 +276,13 @@ for i in range(args.n_runs):
         timestamps_batch = train_data.timestamps[start_idx:end_idx]
 
         size = len(sources_batch)
-        neg_sample_size = size * NUM_NEG if NUM_NEG > 1 else size
-        _, sampled_negatives = train_rand_sampler.sample(neg_sample_size)
-        negatives_batch = sampled_negatives.reshape(size, NUM_NEG) if NUM_NEG > 1 else sampled_negatives
+        if SAMPLER_TYPE == 'history':
+          _, sampled_negatives = train_rand_sampler.sample_batch(sources_batch, timestamps_batch, num_neg=NUM_NEG)
+          negatives_batch = sampled_negatives
+        else:
+          neg_sample_size = size * NUM_NEG if NUM_NEG > 1 else size
+          _, sampled_negatives = train_rand_sampler.sample(neg_sample_size)
+          negatives_batch = sampled_negatives.reshape(size, NUM_NEG) if NUM_NEG > 1 else sampled_negatives
 
         tgn = tgn.train()
 

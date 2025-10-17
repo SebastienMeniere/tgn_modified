@@ -40,7 +40,12 @@ def eval_edge_prediction(model, negative_edge_sampler, data, n_neighbors, batch_
       edge_idxs_batch = data.edge_idxs[s_idx: e_idx]
 
       size = len(sources_batch)
-      _, negative_samples = negative_edge_sampler.sample(size)
+      if hasattr(negative_edge_sampler, "sample_batch"):
+        _, negative_samples = negative_edge_sampler.sample_batch(sources_batch, timestamps_batch, num_neg=1)
+        if negative_samples.ndim > 1:
+          negative_samples = negative_samples[:, 0]
+      else:
+        _, negative_samples = negative_edge_sampler.sample(size)
 
       pos_prob, neg_prob = model.compute_edge_probabilities(sources_batch, destinations_batch,
                                                             negative_samples, timestamps_batch,
