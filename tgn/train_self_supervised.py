@@ -92,6 +92,8 @@ parser.add_argument('--adv_type', type=str, default='filtered_random',
                     choices=['filtered_random', 'popularity_biased', 'temporal_aware'],
                     help='Advanced sampler strategy (only used when --negative_sampler=advanced).')
 
+parser.add_argument("--jitter", action="store_true")
+
 try:
   args = parser.parse_args()
 except:
@@ -123,6 +125,7 @@ SAMPLER_TYPE = args.negative_sampler
 ADV_TYPE = args.adv_type
 FREEZE_MEMORY = args.freeze_memory_during_loss
 USE_MANY_NEG = args.many_neg_scorer
+JITTER = args.jitter
 
 Path("./saved_models/").mkdir(parents=True, exist_ok=True)
 Path("./saved_checkpoints/").mkdir(parents=True, exist_ok=True)
@@ -154,6 +157,7 @@ new_node_test_data = get_data(
   different_new_nodes_between_val_and_test=args.different_new_nodes,
   randomize_features=args.randomize_features,
   data_dir=DATA_DIR,
+  jitter = JITTER
 )
 
 # Initialize training neighbor finder to retrieve temporal graph
