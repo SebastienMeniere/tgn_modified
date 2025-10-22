@@ -128,22 +128,20 @@ class GraphEmbedding(EmbeddingModule):
     src_t = torch.from_numpy(source_nodes).long().to(self.device)
     ts_t = torch.from_numpy(timestamps).float().to(self.device).unsqueeze(1)
 
-    # Δt = 0 for the query node
-    src_time_emb = self.time_proj(self.time_encoder(torch.zeros_like(ts_t)))
-
+    # Project raw node features
     h_src = self.node_proj(self.node_features[src_t])
+    
+    # Add memory if using memory
     if self.use_memory:
       mem = self._project_memory(memory, src_t)
       if mem is not None:
         h_src = h_src + mem
 
+    # Base case: no layers, return projected features
     if n_layers == 0:
       return h_src
 
-    h_src_conv = self.compute_embedding(memory, source_nodes, timestamps,
-                                        n_layers=n_layers - 1,
-                                        n_neighbors=n_neighbors)
-
+    # Get neighbors
     neighbors, edge_idxs, edge_times = self.neighbor_finder.get_temporal_neighbor(
       source_nodes,
       timestamps,
@@ -155,6 +153,7 @@ class GraphEmbedding(EmbeddingModule):
     edge_deltas = timestamps[:, np.newaxis] - edge_times
     edge_deltas_torch = torch.from_numpy(edge_deltas).float().to(self.device)
 
+    # Recursively compute neighbor embeddings
     neigh_flat = neighbors.flatten()
     neighbor_embeddings = self.compute_embedding(memory,
                                                  neigh_flat,
@@ -165,12 +164,17 @@ class GraphEmbedding(EmbeddingModule):
     effective_n_neighbors = n_neighbors if n_neighbors > 0 else 1
     neighbor_embeddings = neighbor_embeddings.view(len(source_nodes), effective_n_neighbors, -1)
 
+    # Project edge features and time
     edge_time_embeddings = self.time_proj(self.time_encoder(edge_deltas_torch))
     edge_features = self.edge_proj(self.edge_features[edge_idxs_torch, :])
+    
+    # Δt = 0 for the query node (compute AFTER neighbor computation to avoid redundancy)
+    src_time_emb = self.time_proj(self.time_encoder(torch.zeros_like(ts_t)))
 
     mask = neighbors_torch == 0
 
-    source_embedding = self.aggregate(n_layers, h_src_conv,
+    # CRITICAL FIX: Pass h_src (with memory) instead of h_src_conv
+    source_embedding = self.aggregate(n_layers, h_src,
                                       src_time_emb,
                                       neighbor_embeddings,
                                       edge_time_embeddings,
