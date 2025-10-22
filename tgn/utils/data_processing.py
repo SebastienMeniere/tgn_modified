@@ -87,7 +87,7 @@ def add_temporal_jitter(timestamps, jitter_scale=1e-5):
 def get_data(dataset_name,
              different_new_nodes_between_val_and_test=False,
              randomize_features=False,
-             data_dir: str | Path = "../data/processed", jitter=False):
+             data_dir: str | Path = "../data/synth", jitter=False):
   ### Load data and train val test split
   graph_path, edge_path, node_path = _resolve_dataset_paths(dataset_name, Path(data_dir))
   graph_df = pd.read_csv(graph_path)

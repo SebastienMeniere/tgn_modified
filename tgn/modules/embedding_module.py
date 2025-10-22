@@ -135,11 +135,12 @@ class GraphEmbedding(EmbeddingModule):
     """
     Compute embeddings with fixed projection logic.
     
-    Key fixes:
+    CRITICAL FIXES:
     1. Remove redundant h_src_conv computation
     2. Use h_src (with memory) directly in aggregation
-    3. Ensure all projections happen before aggregation
-    4. Add dimension assertions for debugging
+    3. Use edge_times for neighbor embeddings (not repeated query times)
+    4. Ensure all projections happen before aggregation
+    5. Add dimension assertions for debugging
     """
     assert n_layers >= 0
 
@@ -173,16 +174,23 @@ class GraphEmbedding(EmbeddingModule):
     neighbors_torch = torch.from_numpy(neighbors).long().to(self.device)
     edge_idxs_torch = torch.from_numpy(edge_idxs).long().to(self.device)
 
-    # Step 4: Compute edge time deltas
+    # Step 4: Compute edge time deltas (for edge time embeddings)
     edge_deltas = timestamps[:, np.newaxis] - edge_times
     edge_deltas_torch = torch.from_numpy(edge_deltas).float().to(self.device)
 
     # Step 5: Recursively compute neighbor embeddings
+    # CRITICAL FIX: Use edge_times (actual interaction times) not repeated query times
     neigh_flat = neighbors.flatten()
+    edge_times_flat = edge_times.flatten()
+    
+    # Validate shapes match
+    assert len(neigh_flat) == len(edge_times_flat), \
+      f"Shape mismatch: neighbors {len(neigh_flat)} != edge_times {len(edge_times_flat)}"
+    
     neighbor_embeddings = self.compute_embedding(
       memory,
       neigh_flat,
-      np.repeat(timestamps, n_neighbors),
+      edge_times_flat,  # Use actual edge timestamps, not repeated query times
       n_layers=n_layers - 1,
       n_neighbors=n_neighbors
     )
@@ -269,6 +277,7 @@ class GraphSumEmbedding(GraphEmbedding):
     Fixed to ensure dimension consistency:
     - All inputs should be in embedding_dimension
     - Concatenations are done correctly
+    - Proper masking to exclude padding
     - Layer normalization is applied at the end
     """
     # Verify dimensions

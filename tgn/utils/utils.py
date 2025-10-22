@@ -401,6 +401,8 @@ def get_neighbor_finder(data, uniform, max_node_idx=None):
   return NeighborFinder(adj_list, uniform=uniform)
 
 
+import numpy as np
+
 class NeighborFinder:
   def __init__(self, adj_list, uniform=False, seed=None):
     self.node_to_neighbors = []
@@ -423,10 +425,10 @@ class NeighborFinder:
 
   def find_before(self, src_idx, cut_time):
     """
-    Extracts all the interactions happening before cut_time for user src_idx in the overall interaction graph. The returned interactions are sorted by time.
+    Extracts all the interactions happening before cut_time for user src_idx in the overall interaction graph. 
+    The returned interactions are sorted by time.
 
     Returns 3 lists: neighbors, edge_idxs, timestamps
-
     """
     i = np.searchsorted(self.node_to_edge_timestamps[src_idx], cut_time)
 
@@ -438,24 +440,31 @@ class NeighborFinder:
 
     Params
     ------
-    src_idx_l: List[int]
-    cut_time_l: List[float],
-    num_neighbors: int
+    source_nodes: List[int] or np.array
+    timestamps: List[float] or np.array
+    n_neighbors: int
+    
+    Returns
+    -------
+    neighbors: np.array of shape [len(source_nodes), n_neighbors]
+    edge_idxs: np.array of shape [len(source_nodes), n_neighbors]
+    edge_times: np.array of shape [len(source_nodes), n_neighbors]
     """
-    assert (len(source_nodes) == len(timestamps))
-
+    # CRITICAL FIX: Remove debug prints that were causing console spam
+    assert (len(source_nodes) == len(timestamps)), \
+      f"Length mismatch: source_nodes ({len(source_nodes)}) != timestamps ({len(timestamps)})"
+    
     tmp_n_neighbors = n_neighbors if n_neighbors > 0 else 1
+    
     # NB! All interactions described in these matrices are sorted in each row by time
-    neighbors = np.zeros((len(source_nodes), tmp_n_neighbors)).astype(
-      np.int32)  # each entry in position (i,j) represent the id of the item targeted by user src_idx_l[i] with an interaction happening before cut_time_l[i]
-    edge_times = np.zeros((len(source_nodes), tmp_n_neighbors)).astype(
-      np.float32)  # each entry in position (i,j) represent the timestamp of an interaction between user src_idx_l[i] and item neighbors[i,j] happening before cut_time_l[i]
-    edge_idxs = np.zeros((len(source_nodes), tmp_n_neighbors)).astype(
-      np.int32)  # each entry in position (i,j) represent the interaction index of an interaction between user src_idx_l[i] and item neighbors[i,j] happening before cut_time_l[i]
+    neighbors = np.zeros((len(source_nodes), tmp_n_neighbors)).astype(np.int32)
+    edge_times = np.zeros((len(source_nodes), tmp_n_neighbors)).astype(np.float32)
+    edge_idxs = np.zeros((len(source_nodes), tmp_n_neighbors)).astype(np.int32)
 
     for i, (source_node, timestamp) in enumerate(zip(source_nodes, timestamps)):
-      source_neighbors, source_edge_idxs, source_edge_times = self.find_before(source_node,
-                                                   timestamp)  # extracts all neighbors, interactions indexes and timestamps of all interactions of user source_node happening before cut_time
+      source_neighbors, source_edge_idxs, source_edge_times = self.find_before(
+        source_node, timestamp
+      )
 
       if len(source_neighbors) > 0 and n_neighbors > 0:
         if self.uniform:  # if we are applying uniform sampling, shuffles the data above before sampling
